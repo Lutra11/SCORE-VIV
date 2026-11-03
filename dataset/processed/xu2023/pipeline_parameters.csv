@@ -1,0 +1,12 @@
+parameter,symbol,value,unit,status,source_type
+model_total_length,L,5.6,m,Published,published_table
+outer_diameter,D,0.016,m,Published,published_table
+inner_copper_tube_diameter,d_cu,0.008,m,Published,published_table
+flexural_rigidity,EI,17.45,N*m^2,Published,published_table
+mass_per_length_in_air,m_s,0.3821,kg/m,Published,published_table
+mass_ratio,m_star,1.90,1,Published,published_table
+axial_force_case_50,T,50,N,Published,published_table
+axial_force_case_100,T,100,N,Published,published_table
+axial_force_case_150,T,150,N,Published,published_table
+axial_force_case_200,T,200,N,Published,published_table
+

@@ -1,0 +1,6 @@
+experiment_id: E8
+status: NOT_IMPLEMENTED
+seed: 20261103
+requires: [E7_IMPLEMENTED]
+variants: [full, no_noise_correction, single_depth, no_interval, fixed_budget, standard_abc, no_active_learning]
+

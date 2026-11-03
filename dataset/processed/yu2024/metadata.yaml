@@ -1,0 +1,9 @@
+dataset_id: yu2024
+doi: 10.1002/dug2.12068
+source_type: published_table
+status: FINAL_TABLE_ORGANIZED_HISTORY_PENDING
+limitations:
+  - Test-2 and Test-6 histories require figure digitization.
+  - The 30-minute text and 3600-second figure range require reconciliation.
+  - This dataset validates scour, not multi-span VIV fatigue.
+

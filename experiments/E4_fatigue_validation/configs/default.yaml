@@ -1,0 +1,6 @@
+experiment_id: E4
+status: NOT_IMPLEMENTED
+seed: 20261103
+requires: [E1_VALIDATED, STRESS_HISTORY_OR_VALIDATED_SPECTRAL_METHOD]
+sn_curve: TBD
+

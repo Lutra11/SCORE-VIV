@@ -1,0 +1,9 @@
+experiment_id: E6
+status: NOT_IMPLEMENTED
+seed: 20261103
+requires: [E5_VALIDATED]
+grover_depths: [0, 1, 2, 4, 8, 16]
+initial_budget: 2048
+max_budget: 8192
+confidence_level: 0.95
+

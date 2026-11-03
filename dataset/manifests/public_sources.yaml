@@ -1,0 +1,27 @@
+manifest_version: 1
+sources:
+  xu2023:
+    doi: 10.1007/s13344-023-0016-4
+    official_url: https://link.springer.com/content/pdf/10.1007/s13344-023-0016-4.pdf
+    expected_path: dataset/raw/xu2023/article.pdf
+    status: NOT_DOWNLOADED
+    sha256: TBD
+  yu2024:
+    doi: 10.1002/dug2.12068
+    official_url: https://onlinelibrary.wiley.com/doi/full/10.1002/dug2.12068
+    expected_path: dataset/raw/yu2024/article.pdf
+    status: NOT_DOWNLOADED
+    sha256: TBD
+  li2025_scour3d:
+    doi: 10.3390/jmse13122278
+    official_url: https://www.mdpi.com/2077-1312/13/12/2278
+    expected_path: dataset/raw/li2025_scour3d/article.pdf
+    status: NOT_DOWNLOADED
+    sha256: TBD
+  lu2025_fatigue:
+    doi: 10.1016/j.oceaneng.2025.120666
+    official_url: https://doi.org/10.1016/j.oceaneng.2025.120666
+    expected_path: dataset/raw/lu2025_fatigue/article.pdf
+    status: NOT_DOWNLOADED
+    sha256: TBD
+

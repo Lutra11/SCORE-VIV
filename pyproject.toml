@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "score-viv"
+version = "0.1.0"
+description = "Scour-coupled optimization and reliability evaluation for subsea multi-span pipeline VIV"
+requires-python = ">=3.10,<3.11"
+
+[tool.setuptools]
+package-dir = {"" = "algorithm"}
+
+[tool.setuptools.packages.find]
+where = ["algorithm"]
+include = ["score_viv*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+

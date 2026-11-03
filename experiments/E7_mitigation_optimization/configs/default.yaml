@@ -1,0 +1,7 @@
+experiment_id: E7
+status: NOT_IMPLEMENTED
+seed: 20261103
+requires: [E5_VALIDATED, E6_VALIDATED]
+independent_runs: 30
+optimizers: [MC-ABC, MC-PSO, MC-GWO, MC-GA, MLAE-ABC, IQAE-ABC, NA-QAE-ABC]
+

@@ -1,0 +1,10 @@
+dataset_id: xu2023
+doi: 10.1007/s13344-023-0016-4
+source_type: published_table
+status: PARTIALLY_ORGANIZED
+limitations:
+  - shoulder_geometry: TBD
+  - soil_springs: TBD
+  - raw_strain_histories: NOT_CONFIRMED_PUBLIC
+  - model_to_prototype_fatigue_scaling: NOT_ESTABLISHED
+

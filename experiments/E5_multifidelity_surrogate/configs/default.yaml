@@ -1,0 +1,6 @@
+experiment_id: E5
+status: NOT_IMPLEMENTED
+seed: 20261103
+requires: [E3_VALIDATED, E4_VALIDATED]
+fidelities: [low, medium, high]
+

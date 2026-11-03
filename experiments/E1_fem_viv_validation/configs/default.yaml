@@ -1,0 +1,6 @@
+experiment_id: E1
+status: NOT_IMPLEMENTED
+seed: 20261103
+dataset: dataset/processed/xu2023
+stages: [beam_element, analytical_modal, mesh_convergence, multispan_modal, viv_response]
+

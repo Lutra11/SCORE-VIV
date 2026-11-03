@@ -1,0 +1,6 @@
+experiment_id: E2
+status: NOT_IMPLEMENTED
+seed: 20261103
+dataset: dataset/processed/yu2024
+stages: [equilibrium_depth, temporal_model, profile_model]
+

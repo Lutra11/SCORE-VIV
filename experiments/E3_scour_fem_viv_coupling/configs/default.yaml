@@ -1,0 +1,6 @@
+experiment_id: E3
+status: NOT_IMPLEMENTED
+seed: 20261103
+requires: [E1_VALIDATED, E2_VALIDATED]
+coupling: one_way
+

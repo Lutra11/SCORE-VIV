@@ -78,7 +78,13 @@ def main() -> int:
               f"output={args.output_dir} seed={args.seed}")
         return 0
 
-    cfg = load_config(Path(__file__).parent / args.config)
+    cfg_path = Path(args.config)
+    if not cfg_path.is_absolute():
+        cand = Path(__file__).parent / cfg_path
+        if not cand.exists():
+            cand = ROOT / cfg_path
+        cfg_path = cand
+    cfg = load_config(cfg_path)
     merge_overrides(cfg, args.overrides)
     base_rng = seed_everything(args.seed)
     out = ensure_dir(Path(args.output_dir))

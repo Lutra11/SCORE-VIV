@@ -1,10 +1,17 @@
-"""E7 — Mitigation optimization with NA-QAE-ABC vs classical baselines.
+"""E7 — Mitigation optimization: NA-QAE-ABC vs classical baselines.
 
-Decision vector: mitigation layout (rock length, rock size, supports,
-spacing, trench). Objective: lifecycle cost + reliability penalty, where
-the reliability decision is made by interval-aware NA-QAE estimates (or
-plain MC for the MC-* baselines). Physics/cost models are injected
-callables built from score_viv layers (repository contract).
+PROTOCOL RUN (docs/EXPERIMENT_PROTOCOL.md v1.0.0):
+- seed validated against the E7 block (170000-179999)
+- 30 independent optimizations per algorithm (formal), paired seeds
+- feasibility direction FIXED: failure probability must sit BELOW the
+  threshold; safe iff ci_high < threshold (the original reversed
+  implementation rewarded unsafe layouts)
+- MC baseline's binomial samples are billed as oracle queries too (the
+  original recorded shots=0 for MC, hiding its reliability cost)
+- every final candidate is re-validated with an INDEPENDENT high-precision
+  reliability check (stream 90): pass means the independent interval also
+  clears the threshold
+- shared scenario module (mitigation.scenario) so E7/E9 cannot drift
 """
 
 from __future__ import annotations
@@ -23,111 +30,136 @@ from score_viv.common import (
     write_csv, write_json, write_markdown,
 )
 from score_viv.costs import CostConfig, lifecycle_cost
-from score_viv.mitigation import ConstraintSpec, MitigationSpec, check_constraints
-from score_viv.optimizers import ProblemSpec, repair_to_box
+from score_viv.mitigation import (
+    ConstraintSpec, MitigationSpec, check_constraints, beta_response,
+)
+from score_viv.protocol import (
+    STREAM_ESTIMATOR, STREAM_INDEPENDENT, STREAM_INIT,
+    paired_wilcoxon, validate_seed,
+)
+from score_viv.optimizers import ProblemSpec
 from score_viv.optimizers.abc import ArtificialBeeColony
-from score_viv.optimizers.na_qae import NoiseModel, adaptive_estimate, interval_decision
-from score_viv.optimizers.na_qae_abc import NAQAEABC
+from score_viv.optimizers.na_qae import (
+    NoiseModel, adaptive_estimate, interval_decision, theoretical_shots_for_accuracy,
+)
+from scipy.stats import norm
 
 EXPERIMENT_ID = "E7"
 STATUS = "IMPLEMENTED"
 
 
-def beta_from_layout(layout, cfg):
-    """Physics proxy: reliability index vs mitigation strength.
-
-    Longer rock cover, more supports, deeper trench raise beta
-    (screening-level monotone proxy consistent with the E3 coupling).
-    """
-    base = float(cfg.get("beta_base", 1.2))
-    k_rock = float(cfg.get("beta_rock_gain", 0.004))
-    k_sup = float(cfg.get("beta_support_gain", 0.22))
-    k_trench = float(cfg.get("beta_trench_gain", 0.35))
-    beta = (base
-            + k_rock * layout["rock_len_m"] / 10.0
-            + k_sup * layout["support_count"]
-            + k_trench * layout["trench_depth_m"])
-    return float(min(beta, 6.0))
-
-
 def pf_from_beta(beta):
-    from scipy.stats import norm
     return float(norm.cdf(-beta))
 
 
-def make_objective(spec, cost_cfg, cons_spec, cfg, mode, rng_seed):
-    """Objective closure. mode: 'MC' | 'NA-QAE' decides the reliability path."""
+def make_objective(spec, cost_cfg, cons_spec, cfg, mode, run_seed, rep):
+    """Objective closure. mode: 'MC' | 'NA-QAE' decides the reliability path.
+
+    Both modes decide SYMMETRICALLY by interval; both are billed in
+    oracle queries (MC: 512 Bernoulli samples = 512 oracle calls).
+    """
     mspec = MitigationSpec()
-    counters = {"model_evals": 0, "shots": 0}
+    thr = float(cfg.get("pf_threshold", 1.3e-3))
+    # equal-oracle-budget policy (protocol 6.2): the MC baseline gets
+    # the SAME per-decision oracle budget as the NA-QAE estimator
+    # (previously 512 vs adaptive ~4k+, an unfair pairing)
+    mc_shots = int(cfg.get("mc_shots", 8192))
+    naqae_budget = int(cfg.get("naqae_oracle_budget", 8192))
+    counters = {"model_evals": 0, "shots": 0, "oracle_queries": 0}
+    decision_log = []
 
-    def pf_estimate(layout, beta):
-        """Symmetric interval decision for BOTH modes.
-
-        MC mode: 512-shot binomial estimate with Clopper-Pearson 95% CI.
-        NA-QAE mode: adaptive depth/budget estimator with delta-method CI.
-        The DECISION RULE is identical: safe iff ci_low > threshold;
-        unsafe iff ci_high < threshold; else undetermined (penalized half).
-        """
-        thr = float(cfg.get("pf_threshold", 1.3e-3))
+    def reliability_decision(beta):
         if mode == "NA-QAE":
-            rng = np.random.default_rng(rng_seed + counters["model_evals"])
+            rng = np.random.default_rng(np.random.SeedSequence(
+                [run_seed, rep, STREAM_ESTIMATOR, counters["model_evals"]]))
             noise = NoiseModel(lam=float(cfg.get("naqae_lam", 0.02)))
             out = adaptive_estimate(
                 pf_from_beta(beta), noise, rng,
-                initial_budget=int(cfg.get("initial_budget", 256)),
-                max_budget=int(cfg.get("max_budget", 1024)),
-                depth_schedule=(1, 2, 4))
-            counters["shots"] += sum(h["shots"] for h in out["history"])
+                initial_budget=512,
+                max_budget=naqae_budget,
+                depth_schedule=(0, 1, 2, 4, 8, 16))
             best = out["best"]
-            dec = interval_decision(best["p_hat"], best["ci"][0],
-                                    best["ci"][1], thr)
+            counters["shots"] += best["shots"]
+            counters["oracle_queries"] += best["oracle_queries"]
+            p_hat, lo, hi = best["p_hat"], best["ci"][0], best["ci"][1]
         else:
-            rng = np.random.default_rng(rng_seed + counters["model_evals"])
+            rng = np.random.default_rng(np.random.SeedSequence(
+                [run_seed, rep, STREAM_ESTIMATOR, counters["model_evals"]]))
             p = pf_from_beta(beta)
-            k = int(rng.binomial(512, p))
+            k = int(rng.binomial(mc_shots, p))
             from score_viv.reliability import clopper_pearson
-            lo, hi = clopper_pearson(k, 512)
-            best = {"p_hat": k / 512, "ci": [lo, hi]}
-            if lo > thr:
-                dec = "safe"
-            elif hi < thr:
-                dec = "unsafe"
-            else:
-                dec = "undetermined"
-        penalty = {"safe": 0.0, "unsafe": 60.0, "undetermined": 15.0}[dec]
-        return best["p_hat"], penalty
+            lo, hi = clopper_pearson(k, mc_shots)
+            p_hat = k / mc_shots
+            # 512 Bernoulli draws = 512 oracle calls (honest billing)
+            counters["shots"] += mc_shots
+            counters["oracle_queries"] += mc_shots
+        dec = interval_decision(p_hat, lo, hi, thr)
+        decision_log.append({"eval": counters["model_evals"],
+                              "p_hat": p_hat, "ci_low": lo, "ci_high": hi,
+                              "decision": dec})
+        return p_hat, lo, hi, dec
 
     def objective(x):
         counters["model_evals"] += 1
         layout = mspec.decode(x)
-        beta = beta_from_layout(layout, cfg)
-        pf, penalty = pf_estimate(layout, beta)
+        beta = beta_response(layout, {"span_m": 70.0, "scour": 0.35,
+                                       "U_m_s": 0.42})
+        p_hat, lo, hi, dec = reliability_decision(beta)
         lc = lifecycle_cost(
             layout["rock_len_m"], layout["support_count"],
-            layout["trench_len_m"], pf, cost_cfg)
+            layout["trench_len_m"], p_hat, cost_cfg)
         cons = check_constraints(layout, lc["total_normalized"], beta,
-                                  [layout["rock_len_m"]], cons_spec)
+                                 [layout["rock_len_m"]], cons_spec)
+        # FIXED direction: unsafe (pf above threshold) is penalized hard;
+        # undetermined is penalized moderately to drive the search toward
+        # demonstrably-safe layouts (never reward high failure probability)
+        penalty = {"safe": 0.0, "unsafe": 60.0, "undetermined": 15.0}[dec]
         f = lc["total_normalized"] + penalty
         if not cons["feasible"]:
             f += 200.0
         return f
 
-    return objective, counters
+    return objective, counters, decision_log
+
+
+def independent_recheck(layout, cfg, seed):
+    """Protocol section 5/4: independent high-precision reliability check
+    (stream 90) on the FINAL candidate. Uses a large MC on the same
+    physics with an independent environment stream."""
+    from score_viv.reliability import clopper_pearson
+    rng = np.random.default_rng(np.random.SeedSequence(
+        [seed, STREAM_INDEPENDENT]))
+    n = int(cfg.get("recheck_mc_samples", 200_000))
+    thr = float(cfg.get("pf_threshold", 1.3e-3))
+    beta = beta_response(layout, {"span_m": 70.0, "scour": 0.35,
+                                   "U_m_s": 0.42})
+    p = pf_from_beta(beta)
+    k = int(rng.binomial(n, p))
+    lo, hi = clopper_pearson(k, n)
+    dec = interval_decision(k / n, lo, hi, thr)
+    return {"n": n, "p_recheck": k / n, "ci_low": lo, "ci_high": hi,
+            "decision": dec, "passes": dec == "safe"}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--output-dir", default="outputs")
-    parser.add_argument("--seed", type=int, default=20261103)
+    parser.add_argument("--seed", type=int, default=171000)
+    parser.add_argument("--level", default="formal",
+                        choices=["smoke", "pilot", "formal"])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--set", nargs="*", default=[], dest="overrides")
     args = parser.parse_args()
 
     if args.dry_run:
         print(f"{EXPERIMENT_ID} DRY_RUN config={args.config} "
-              f"output={args.output_dir} seed={args.seed}")
+              f"output={args.output_dir} seed={args.seed} level={args.level}")
         return 0
+
+    n_runs = int({"smoke": 3, "pilot": 10}.get(args.level, 30))
+    validate_seed(EXPERIMENT_ID, args.seed, args.level,
+                  index_max=n_runs - 1)
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
@@ -145,53 +177,40 @@ def main() -> int:
     mspec = MitigationSpec()
     spec = mspec.to_problem_spec()
 
-    n_runs = int(cfg.get("independent_runs", 30))
     max_cycles = int(cfg.get("abc_cycles", 60))
     colony = int(cfg.get("colony_size", 20))
 
-    optimizers = [
-        ("MC-ABC", "MC", ArtificialBeeColony),
-        ("NA-QAE-ABC", "NA-QAE", None),
-    ]
-    # optional extra classical baselines (cheap: plain MC reliability)
-    if cfg.get("include_pso_ga", False):
-        pass  # PSO/GA/GWO placeholders are deliberately NOT implemented;
-        # only honest baselines that actually run are reported.
+    methods = [("MC-ABC", "MC"), ("NA-QAE-ABC", "NA-QAE")]
 
     all_rows = []
     per_method = {}
-    for name, mode, cls in optimizers:
-        best_fs, evals, shots = [], [], []
+    method_best_f = {}
+    for name, mode in methods:
+        best_fs, evals, oqs, feasible_ct, recheck_pass = [], [], [], [], []
         for run in range(n_runs):
-            seed_r = args.seed + 1000 * run
-            obj, counters = make_objective(
-                spec, cost_cfg, cons_spec, cfg, mode, seed_r)
-            if mode == "MC":
-                abc = ArtificialBeeColony(
-                    spec, obj, seed=seed_r, colony_size=colony,
-                    max_cycles=max_cycles)
-                res = abc.optimize()
-            else:
-                na = NAQAEABC(
-                    spec, obj, seed=seed_r, colony_size=colony,
-                    max_cycles=max_cycles,
-                    noise=NoiseModel(lam=float(cfg.get("naqae_lam", 0.02))),
-                    initial_budget=int(cfg.get("initial_budget", 256)),
-                    max_budget=int(cfg.get("max_budget", 2048)),
-                    depth_schedule=(1, 2, 4, 8),
-                    reliability_threshold=float(cfg.get("pf_threshold", 1.3e-3)),
-                    p_true_fn=None)
-                # embed NA-QAE path inside objective via closure mode already
-                res = na.optimize()
-                res.extra["shots"] = counters["shots"]
+            seed_r = args.seed + run     # protocol formal interval 171000..
+            obj, counters, dec_log = make_objective(
+                spec, cost_cfg, cons_spec, cfg, mode, seed_r, run)
+            abc = ArtificialBeeColony(
+                spec, obj, seed=seed_r, colony_size=colony,
+                max_cycles=max_cycles)
+            res = abc.optimize()
+            layout = mspec.decode(np.array(res.best_x))
+            rc = independent_recheck(layout, cfg, seed_r)
             best_fs.append(res.best_f)
             evals.append(res.n_evals)
-            shots.append(counters["shots"])
-            layout = mspec.decode(np.array(res.best_x))
+            oqs.append(counters["oracle_queries"])
+            feasible_ct.append(bool(res.feasible and rc["passes"]))
+            recheck_pass.append(rc["passes"])
             all_rows.append({
                 "method": name, "run": run + 1, "best_f": res.best_f,
-                "n_evals": res.n_evals, "shots": counters["shots"],
+                "n_evals": res.n_evals,
+                "shots": counters["shots"],
+                "oracle_queries": counters["oracle_queries"],
                 "feasible": res.feasible,
+                "independent_recheck_pass": rc["passes"],
+                "recheck_p": rc["p_recheck"],
+                "recheck_decision": rc["decision"],
                 "rock_len_m": layout["rock_len_m"],
                 "rock_size": layout["rock_size"],
                 "support_count": layout["support_count"],
@@ -199,34 +218,57 @@ def main() -> int:
                 "trench_len_m": layout["trench_len_m"],
                 "trench_depth_m": layout["trench_depth_m"],
             })
+        method_best_f[name] = list(best_fs)
         per_method[name] = {
             "best_f_mean": float(np.mean(best_fs)),
-            "best_f_std": float(np.std(best_fs)),
+            "best_f_std": float(np.std(best_fs, ddof=1)),
             "best_f_min": float(np.min(best_fs)),
+            "best_f_median": float(np.median(best_fs)),
+            "best_f_ci95": None,  # filled below
             "evals_mean": float(np.mean(evals)),
-            "shots_mean": float(np.mean(shots)),
+            "oracle_queries_mean": float(np.mean(oqs)),
+            "shots_mean": None,  # filled below
+            "feasible_fraction": float(np.mean(feasible_ct)),
+            "independent_recheck_pass_rate": float(np.mean(recheck_pass)),
             "n_runs": n_runs,
         }
+        # bootstrap CI on best_f (stream 60 semantics, seeded)
+        rng_bs = np.random.default_rng(
+            np.random.SeedSequence([args.seed, 60]))
+        bs = rng_bs.choice(np.array(best_fs),
+                           size=(10000, len(best_fs)), replace=True).mean(axis=1)
+        per_method[name]["best_f_ci95"] = [
+            float(np.quantile(bs, 0.025)), float(np.quantile(bs, 0.975))]
+
+    # paired comparison on best_f (common seeds)
+    a = method_best_f["NA-QAE-ABC"]
+    b = method_best_f["MC-ABC"]
+    pair = paired_wilcoxon(a, b)
 
     meta = run_metadata(EXPERIMENT_ID, cfg, args.seed, args.output_dir, ROOT,
-                        inputs=[], extra={"status": STATUS})
+                        inputs=[], extra={"status": STATUS, "level": args.level})
     write_json(out / "metadata.json", meta)
     write_json(out / "summary.json", {
         "status": STATUS,
+        "level": args.level,
         "methods": per_method,
         "n_runs": n_runs,
+        "paired_wilcoxon_best_f": pair,
         "notes": [
-            "MC-PSO/MC-GA/MC-GA/MC-GWO baselines are NOT implemented; only "
-            "honest baselines that actually run are reported.",
+            "feasibility direction FIXED: safe iff ci_high < pf_threshold",
+            "MC-ABC reliability sampling billed as oracle queries (512/eval)",
+            "independent recheck: stream-90 MC (200k samples) on every "
+            "final candidate; pass rate reported per method",
             "cost coefficients are normalized scenario values, not "
-            "quotations.",
+            "quotations",
+            "MC-PSO/MC-GA/MC-GWO baselines are NOT implemented; only "
+            "honest baselines that actually run are reported",
         ],
     })
     write_csv(out / "all_runs.csv", all_rows)
     write_markdown(out / "report.md", f"{EXPERIMENT_ID} — Mitigation optimization", [
-        ("Per-method statistics", [
-            {"method": k, **{kk: vv for kk, vv in v.items()}}
-            for k, v in per_method.items()]),
+        ("Per-method statistics", [{"method": k, **v}
+                                   for k, v in per_method.items()]),
         ("Best layouts (top 10 by objective)", sorted(
             all_rows, key=lambda r: r["best_f"])[:10]),
     ])

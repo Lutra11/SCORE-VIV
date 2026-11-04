@@ -65,15 +65,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--output-dir", default="outputs")
-    parser.add_argument("--seed", type=int, default=20261103)
+    parser.add_argument("--seed", type=int, default=141000)
+    parser.add_argument("--level", default="formal",
+                        choices=["smoke", "pilot", "formal"])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--set", nargs="*", default=[], dest="overrides")
     args = parser.parse_args()
 
     if args.dry_run:
         print(f"{EXPERIMENT_ID} DRY_RUN config={args.config} "
-              f"output={args.output_dir} seed={args.seed}")
+              f"output={args.output_dir} seed={args.seed} "
+              f"level={args.level}")
         return 0
+
+    from score_viv.protocol import validate_seed
+    validate_seed(EXPERIMENT_ID, args.seed, args.level)
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
@@ -137,6 +143,7 @@ def main() -> int:
     write_json(out / "metadata.json", meta)
     write_json(out / "summary.json", {
         "status": STATUS,
+    "level": args.level,
         "route1_damage_window": dmg_hist,
         "route2_damage_window": dmg_spec_window,
         "routes_ratio_window": (dmg_hist / dmg_spec_window

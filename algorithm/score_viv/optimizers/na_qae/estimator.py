@@ -14,6 +14,14 @@ A depolarizing channel attenuates the register toward the uniform measure:
 
 Finite shots sample k ~ Binomial(shots, q).
 
+BUDGET / ORACLE ACCOUNTING (protocol section 6.2)
+--------------------------------------------------
+Every measurement at depth m costs shots * (2m+1) ORACLE QUERIES, not
+``shots``. ``adaptive_estimate`` enforces its ``max_budget`` on the TOTAL
+ORACLE-QUERY count across all depths and rounds, and every returned
+estimate carries ``oracle_queries`` alongside ``total_shots`` so budget
+comparisons cannot confuse the two.
+
 ESTIMATION
 ----------
 A single-depth arcsin inversion is ambiguous (phase wrapping when
@@ -37,7 +45,7 @@ classical RNG; this is NOT a claim of real quantum-hardware acceleration.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.stats import chi2, norm
@@ -97,6 +105,18 @@ def measure_counts(p_true: float, m: int, shots: int, noise: NoiseModel,
     return int(rng.binomial(int(shots), min(max(q, 0.0), 1.0)))
 
 
+def oracle_cost(m: int, shots: int) -> int:
+    """Protocol 6.2: one depth-m batch of ``shots`` costs shots*(2m+1)."""
+    return int(shots) * grover_iterations(int(m))
+
+
+def count_list_oracle_queries(counts) -> int:
+    total = 0
+    for m, _k, n in counts:
+        total += oracle_cost(int(m), int(n))
+    return int(total)
+
+
 @dataclass
 class QAEEstimate:
     depth: int
@@ -108,6 +128,7 @@ class QAEEstimate:
     eta: float
     ideal_bound: float
     method: str = "NA-QAE"
+    oracle_queries: int = 0
 
 
 def _grid(n: int = 5000) -> np.ndarray:
@@ -120,7 +141,8 @@ def joint_mle(counts, assumed_noise: NoiseModel, grid: np.ndarray | None = None,
 
     counts: iterable of (depth m, good counts k, shots n). The likelihood
     uses ``assumed_noise`` — pass a mismatched model to express the
-    no-correction ablation honestly.
+    no-correction ablation honestly. The result carries BOTH total_shots
+    and oracle_queries = sum(n * (2m+1)).
     """
     counts = [(int(m), int(k), int(n)) for m, k, n in counts if int(n) > 0]
     if not counts:
@@ -146,7 +168,8 @@ def joint_mle(counts, assumed_noise: NoiseModel, grid: np.ndarray | None = None,
     return {"p_hat": p_hat, "ci_low": lo, "ci_high": hi,
             "half_width": half, "var_hat": var_hat, "method": method,
             "n_depths": len({m for m, _, _ in counts}),
-            "total_shots": int(sum(n for _, _, n in counts))}
+            "total_shots": int(sum(n for _, _, n in counts)),
+            "oracle_queries": count_list_oracle_queries(counts)}
 
 
 def estimate_at_depth(p_true_or_rng, m: int, shots: int, noise: NoiseModel,
@@ -171,7 +194,8 @@ def estimate_at_depth(p_true_or_rng, m: int, shots: int, noise: NoiseModel,
                     method=f"NA-QAE(m={m})")
     return QAEEstimate(m, shots, out["p_hat"], out["var_hat"],
                        out["ci_low"], out["ci_high"], (assumed_noise or noise).eta(m),
-                       qae_phase_bound(m), method=out["method"])
+                       qae_phase_bound(m), method=out["method"],
+                       oracle_queries=out["oracle_queries"])
 
 
 def adaptive_budget_schedule(initial_budget: int, max_budget: int,
@@ -196,10 +220,15 @@ def adaptive_estimate(p_true: float, noise: NoiseModel,
                       abs_stop: float = 2e-3) -> dict:
     """Adaptive depth x budget ladder with the cross-depth joint MLE.
 
+    PROTOCOL BUDGET SEMANTICS: ``max_budget`` bounds the TOTAL ORACLE
+    QUERIES (sum over depths and rounds of shots*(2m+1)), never the raw
+    shot count. Rounds stop escalating when the oracle budget would be
+    exceeded, so a ladder of six depths at 2048 shots can never silently
+    spend 12,288+ "shots" under an "8192 budget".
+
     Each round measures ``s`` shots at EVERY depth of the schedule,
     refits the joint likelihood on ALL counts so far, and stops when the
-    interval is decisively tight (half <= max(abs_stop, rel_stop * p_hat))
-    or the shot ceiling is reached.
+    interval is decisively tight (half <= max(abs_stop, rel_stop * p_hat)).
     """
     if not (0.0 <= p_true <= 1.0):
         raise ValueError("p must be in [0, 1]")
@@ -209,49 +238,69 @@ def adaptive_estimate(p_true: float, noise: NoiseModel,
     assumed = assumed_noise or noise
     grid = _grid()
 
+    # first round must fit the budget: shrink s until the round fits
     s = max(int(initial_budget), 8)
+    round_cost = sum(oracle_cost(m, s) for m in depths)
+    while round_cost > int(max_budget) and s > 8:
+        s = max(s // 2, 8)
+        round_cost = sum(oracle_cost(m, s) for m in depths)
+    if round_cost > int(max_budget):
+        raise ValueError(
+            f"max_budget={max_budget} oracle queries cannot cover one "
+            f"round at depths {depths} (needs {round_cost})")
+
     counts: list[tuple[int, int, int]] = []
     history = []
-    total = 0
+    oq_total = 0
     best = None
 
-    while total + s * len(depths) <= int(max_budget) or not counts:
+    while True:
         round_shots = 0
+        round_oq = 0
         for m in depths:
             k = measure_counts(p_true, m, s, noise, rng)
             counts.append((m, k, s))
             round_shots += s
-        total += round_shots
+            round_oq += oracle_cost(m, s)
+        oq_total += round_oq
         est = joint_mle(counts, assumed, grid=grid)
         best = {"p_hat": est["p_hat"], "half_width": est["half_width"],
-                "depth": max(depths), "shots": total,
+                "depth": max(depths), "shots": est["total_shots"],
+                "oracle_queries": oq_total,
                 "ci": [est["ci_low"], est["ci_high"]],
                 "eta": noise.eta(max(depths)), "var_hat": est["var_hat"]}
         history.append({"round": len(history) + 1, "shots": round_shots,
-                        "total_shots": total, "p_hat": est["p_hat"],
+                        "total_shots": est["total_shots"],
+                        "oracle_queries": oq_total,
+                        "p_hat": est["p_hat"],
                         "half_width": est["half_width"]})
         target = (stop_half_width if stop_half_width is not None
                   else max(abs_stop, rel_stop * est["p_hat"]))
         if est["half_width"] <= target:
             return {"best": best, "history": history, "stopped_early": True}
+        # next round at doubled shots must still fit the oracle budget
+        next_cost = sum(oracle_cost(m, 2 * s) for m in depths)
+        if oq_total + next_cost > int(max_budget):
+            return {"best": best, "history": history, "stopped_early": False}
         s *= 2
-        if total >= int(max_budget):
-            break
 
-    if best is None:  # single-round ceiling path
-        est = joint_mle(counts, assumed, grid=grid)
-        best = {"p_hat": est["p_hat"], "half_width": est["half_width"],
-                "depth": max(depths), "shots": total,
-                "ci": [est["ci_low"], est["ci_high"]],
-                "eta": noise.eta(max(depths)), "var_hat": est["var_hat"]}
-    return {"best": best, "history": history, "stopped_early": False}
+    # unreachable: loop always returns via stop or budget ceiling
 
 
 def interval_decision(p_hat: float, ci_low: float, ci_high: float,
                       threshold: float) -> str:
-    if ci_low > threshold:
-        return "safe"
+    """FAILURE-PROBABILITY constraint decision (direction fixed).
+
+    p is a failure probability: SMALL is good. Safe requires the entire
+    interval BELOW the threshold (ci_high < thr); unsafe requires the
+    entire interval ABOVE it (ci_low > thr); otherwise undetermined.
+
+    (The original implementation had this reversed — it rewarded
+    high-failure-probability layouts; see protocol section 11.)
+    """
     if ci_high < threshold:
+        return "safe"
+    if ci_low > threshold:
         return "unsafe"
     return "undetermined"
 
@@ -283,17 +332,21 @@ def iqae_estimate(p_true: float, noise: NoiseModel,
     Uses the joint likelihood over ALL depths visited so far (the
     literature IQAE refits one depth; we keep the shared joint core and
     the difference to NA-QAE is the depth-growth rule, not the fitter).
+    ``max_shots`` bounds ORACLE QUERIES, consistent with adaptive_estimate.
     """
     depths = [0, 1, 2, 4]
     counts = []
-    shots_used = 0
+    oq_used = 0
     est = None
     grid = _grid()
-    while depths and shots_used < max_shots:
+    while depths and oq_used < int(max_shots):
         m = depths.pop(0)
+        cost = oracle_cost(m, shots_per_step)
+        if oq_used + cost > int(max_shots):
+            break
         k = measure_counts(p_true, m, shots_per_step, noise, rng)
         counts.append((m, k, shots_per_step))
-        shots_used += shots_per_step
+        oq_used += cost
         est = joint_mle(counts, noise, grid=grid, method="IQAE")
         if est["half_width"] <= eps_target:
             break
@@ -304,8 +357,8 @@ def iqae_estimate(p_true: float, noise: NoiseModel,
     if est is None:
         est = joint_mle([(0, 0, 1)], noise, grid=grid, method="IQAE")
     return {"p_hat": est["p_hat"], "ci_low": est["ci_low"],
-            "ci_high": est["ci_high"], "n_evals": shots_used,
-            "method": "IQAE"}
+            "ci_high": est["ci_high"], "n_evals": oq_used,
+            "oracle_queries": oq_used, "method": "IQAE"}
 
 
 def noise_lam_from_paired(pairs) -> float | None:

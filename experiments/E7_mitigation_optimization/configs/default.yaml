@@ -1,7 +1,30 @@
 experiment_id: E7
-status: NOT_IMPLEMENTED
-seed: 20261103
-requires: [E5_VALIDATED, E6_VALIDATED]
+status: IMPLEMENTED
+seed: 170000
+requires:
+- E5_VALIDATED
+- E6_VALIDATED
 independent_runs: 30
-optimizers: [MC-ABC, MC-PSO, MC-GWO, MC-GA, MLAE-ABC, IQAE-ABC, NA-QAE-ABC]
-
+optimizers:
+- MC-ABC
+- MC-PSO
+- MC-GWO
+- MC-GA
+- MLAE-ABC
+- IQAE-ABC
+- NA-QAE-ABC
+level: formal
+protocol:
+  name: SCORE-VIV-EXPERIMENT-PROTOCOL
+  version: 1.0.0
+reproducibility:
+  seed_policy: experiment-block-v1
+  common_random_numbers: true
+  record_git_commit: true
+  record_environment: true
+  hash_algorithm: sha256
+statistics:
+  confidence_level: 0.95
+  alpha: 0.05
+  bootstrap_resamples: 10000
+  multiple_comparison: holm

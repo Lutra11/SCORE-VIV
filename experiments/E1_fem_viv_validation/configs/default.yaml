@@ -1,6 +1,25 @@
 experiment_id: E1
-status: NOT_IMPLEMENTED
-seed: 20261103
+status: IMPLEMENTED
+seed: 110000
 dataset: dataset/processed/xu2023
-stages: [beam_element, analytical_modal, mesh_convergence, multispan_modal, viv_response]
-
+stages:
+- beam_element
+- analytical_modal
+- mesh_convergence
+- multispan_modal
+- viv_response
+level: formal
+protocol:
+  name: SCORE-VIV-EXPERIMENT-PROTOCOL
+  version: 1.0.0
+reproducibility:
+  seed_policy: experiment-block-v1
+  common_random_numbers: true
+  record_git_commit: true
+  record_environment: true
+  hash_algorithm: sha256
+statistics:
+  confidence_level: 0.95
+  alpha: 0.05
+  bootstrap_resamples: 10000
+  multiple_comparison: holm

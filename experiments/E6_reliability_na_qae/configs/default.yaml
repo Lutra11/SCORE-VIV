@@ -1,9 +1,30 @@
 experiment_id: E6
-status: NOT_IMPLEMENTED
-seed: 20261103
-requires: [E5_VALIDATED]
-grover_depths: [0, 1, 2, 4, 8, 16]
+status: IMPLEMENTED
+seed: 160000
+requires:
+- E5_VALIDATED
+grover_depths:
+- 0
+- 1
+- 2
+- 4
+- 8
+- 16
 initial_budget: 2048
 max_budget: 8192
 confidence_level: 0.95
-
+level: formal
+protocol:
+  name: SCORE-VIV-EXPERIMENT-PROTOCOL
+  version: 1.0.0
+reproducibility:
+  seed_policy: experiment-block-v1
+  common_random_numbers: true
+  record_git_commit: true
+  record_environment: true
+  hash_algorithm: sha256
+statistics:
+  confidence_level: 0.95
+  alpha: 0.05
+  bootstrap_resamples: 10000
+  multiple_comparison: holm

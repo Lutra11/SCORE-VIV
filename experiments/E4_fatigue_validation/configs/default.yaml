@@ -1,6 +1,22 @@
 experiment_id: E4
-status: NOT_IMPLEMENTED
-seed: 20261103
-requires: [E1_VALIDATED, STRESS_HISTORY_OR_VALIDATED_SPECTRAL_METHOD]
+status: IMPLEMENTED
+seed: 140000
+requires:
+- E1_VALIDATED
+- STRESS_HISTORY_OR_VALIDATED_SPECTRAL_METHOD
 sn_curve: TBD
-
+level: formal
+protocol:
+  name: SCORE-VIV-EXPERIMENT-PROTOCOL
+  version: 1.0.0
+reproducibility:
+  seed_policy: experiment-block-v1
+  common_random_numbers: true
+  record_git_commit: true
+  record_environment: true
+  hash_algorithm: sha256
+statistics:
+  confidence_level: 0.95
+  alpha: 0.05
+  bootstrap_resamples: 10000
+  multiple_comparison: holm

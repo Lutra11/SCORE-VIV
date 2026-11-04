@@ -126,46 +126,60 @@ def monte_carlo(rvs, corr_matrix, limit_fn, n: int, rng,
 
 def importance_sampling(rvs, corr_matrix, limit_fn, n: int, rng,
                         design_point_shift=None, alpha: float = 0.05) -> MCResult:
-    """IS with a user-supplied mean shift (delta method style).
+    """Importance sampling with a mean shift on the copula scale.
 
-    Weights: ratio of target density to shifted density on the standard
-    normal copula scale, computed row-wise from the joint Gaussian logpdf.
+    Proposal: y = shift + z @ L.T with z ~ N(0, I), i.e. N(shift, corr)
+    on the correlated standard-normal (copula) scale. Weights are the
+    density ratio on THAT scale:
+
+        w(y) = phi_corr(y; 0, corr) / phi_corr(y; shift, corr)
+
+    (the previous implementation evaluated the ratio at the independent-
+    scale draw with mean=shift, which does not match the sampling law
+    and broke interval coverage).
+
+    Billing: exactly n limit-state evaluations under the proposal.
     """
     k_vars = len(rvs)
     corr = np.asarray(corr_matrix, dtype=float)
-    X = correlated_samples(rvs, corr, n, rng)
-    G = limit_state_values(X, limit_fn)
-    fails = failure_indicator(G)
     if design_point_shift is None:
         # fallback: plain MC with wider reporting
+        X = correlated_samples(rvs, corr, n, rng)
+        fails = failure_indicator(limit_state_values(X, limit_fn))
         kk = int(fails.sum())
         lo, hi = clopper_pearson(kk, n, alpha)
         return MCResult("importance_sampling(uniform-IS)", n, kk,
                         kk / n if n else 0.0, lo or 0.0, hi or 1.0, alpha,
                         {"note": "no shift supplied; identical to MC"})
-    # shift on copula scale: use the supplied shift as mean of proposal
     shift = np.asarray(design_point_shift, dtype=float).ravel()
-    z = rng.standard_normal((n, k_vars))
+    if shift.size != k_vars:
+        raise ValueError("design_point_shift length must equal n_vars")
     L = np.linalg.cholesky(corr + 1e-12 * np.eye(k_vars))
-    z_shift = shift + z
+    # proposal draws on the correlated copula scale
+    z = rng.standard_normal((n, k_vars))
+    y = shift + z @ L.T
+    # physical variables via marginal ppf of the copula uniforms
+    U = norm.cdf(y)
     Xp = np.zeros((n, k_vars))
     for j, rv in enumerate(rvs):
-        Xp[:, j] = _ppf(rv, norm.cdf(z_shift @ L.T)[:, j])
+        Xp[:, j] = _ppf(rv, U[:, j])
     Gp = limit_state_values(Xp, limit_fn)
     failsp = failure_indicator(Gp)
-    # weights via multivariate normal logpdf difference
+    # density ratio on the correlated scale (matches the sampling law)
     cov = corr + 1e-12 * np.eye(k_vars)
-    log_w = (_mvn_logpdf(z_shift, np.zeros(k_vars), cov)
-             - _mvn_logpdf(z_shift, shift, cov))
+    log_w = (_mvn_logpdf(y, np.zeros(k_vars), cov)
+             - _mvn_logpdf(y, shift, cov))
     w = np.exp(np.clip(log_w, -50, 50))
     est = float(np.sum(failsp * w) / n)
     var_est = float(np.sum((failsp * w) ** 2) / n - est ** 2) / n
     z975 = norm.ppf(1 - alpha / 2)
     sd = np.sqrt(max(var_est, 0.0))
     return MCResult(
-        "importance_sampling", 2 * n, int(failsp.sum()), est,
+        "importance_sampling", n, int(failsp.sum()), est,
         float(max(est - z975 * sd, 0.0)), float(min(est + z975 * sd, 1.0)),
-        alpha, {"shift": shift.tolist(), "ess": float(np.sum(w) ** 2 / np.sum(w ** 2))})
+        alpha, {"shift": shift.tolist(),
+                "ess": float(np.sum(w) ** 2 / np.sum(w ** 2))})
+
 
 
 def _mvn_logpdf(x, mean, cov):

@@ -69,15 +69,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--output-dir", default="outputs")
-    parser.add_argument("--seed", type=int, default=20261103)
+    parser.add_argument("--seed", type=int, default=121000)
+    parser.add_argument("--level", default="formal",
+                        choices=["smoke", "pilot", "formal"])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--set", nargs="*", default=[], dest="overrides")
     args = parser.parse_args()
 
     if args.dry_run:
         print(f"{EXPERIMENT_ID} DRY_RUN config={args.config} "
-              f"output={args.output_dir} seed={args.seed}")
+              f"output={args.output_dir} seed={args.seed} "
+              f"level={args.level}")
         return 0
+
+    from score_viv.protocol import validate_seed
+    validate_seed(EXPERIMENT_ID, args.seed, args.level)
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
@@ -133,7 +139,7 @@ def main() -> int:
 
     # --- stage 2: temporal calibration (final states only) --------------------
     T_end = 3600.0
-    D = 0.10  # Yu 2024 model pipe diameter [m] (scenario for time scaling)
+    D = 0.025  # Yu 2024 model pipe diameter [m] (published value)
     U_typ = float(np.mean(xs))
     tau_grid = np.geomspace(60.0, 3600.0, 25)
     best_tau, best_err = None, None
@@ -167,6 +173,8 @@ def main() -> int:
     write_json(out / "metadata.json", meta)
     write_json(out / "summary.json", {
         "status": STATUS,
+    "level": args.level,
+    "pipe_diameter_m": D,
         "n_tests": len(data),
         "predictor": "U_eff = sqrt(U_c^2 + (pi*H/T)^2)",
         "fitted_a": a_fit, "fitted_b": b_fit,
@@ -176,8 +184,11 @@ def main() -> int:
         "loo_mean_abs_err": float(np.mean(loo_errs)) if loo_errs else None,
         "best_tau_s_per_D": best_tau,
         "temporal_mean_rel_err_at_Tend": best_err,
-        "temporal_limitation": "Test-2/Test-6 histories not digitized; tau "
-                               "calibrated on final states only",
+        "temporal_limitation": "Test-2/Test-6 histories not digitized; the "
+                               "temporal model is calibrated against FINAL "
+                               "states only and the 0% self-check is a "
+                               "round-trip consistency test, NOT a time-"
+                               "history validation",
         "free_spans_scenario": [
             {"start_m": s[0], "end_m": s[1], "length_m": s[2],
              "max_gap_m": s[3]} for s in spans],

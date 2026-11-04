@@ -27,7 +27,16 @@ on:
         description: Reproducible random seed
         required: true
         type: string
-        default: "20261103"
+        default: "110000"
+      level:
+        description: Protocol run level (smoke | pilot | formal)
+        required: true
+        type: choice
+        default: formal
+        options:
+          - smoke
+          - pilot
+          - formal
       dry_run:
         description: Validate dispatch without executing numerical work
         required: true
@@ -78,11 +87,13 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           CONFIG_PATH: ${{ inputs.config }}
           RUN_SEED: ${{ inputs.seed }}
+          RUN_LEVEL: ${{ inputs.level }}
         run: |
           args=(
             --config "$EXPERIMENT_DIR/$CONFIG_PATH"
             --output-dir "$OUTPUT_DIR"
             --seed "$RUN_SEED"
+            --level "$RUN_LEVEL"
           )
           if [[ "$DRY_RUN" == "true" ]]; then
             args+=(--dry-run)

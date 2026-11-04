@@ -1,5 +1,10 @@
 # GitHub Actions use
 
+All dispatched runs must follow [`EXPERIMENT_PROTOCOL.md`](EXPERIMENT_PROTOCOL.md).
+In particular, `smoke`, `pilot`, and `formal` runs use separate seed ranges, and
+an artifact is not a formal result unless it passes the protocol admission
+checklist.
+
 ## CI
 
 `ci.yml` installs Python 3.10 on Ubuntu, caches pip dependencies, installs the

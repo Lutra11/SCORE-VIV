@@ -1,9 +1,15 @@
 """E1 — FEM and VIV validation.
 
+PROTOCOL RUN: deterministic benchmark cases; mesh convergence with >= 4
+levels; seed validated against the E1 block.
+
 Stages: beam_element, analytical_modal, mesh_convergence, multispan_modal
-(Xu 2023 double/triple spans), viv_response. All numerical work is real;
-comparisons against Xu 2023 measured frequencies are marked PENDING
-until the digitization queue (dataset/digitized/xu2023) is completed.
+(Xu 2023 double/triple spans with SHOULDER SEGMENTS + soil springs,
+full 5.6 m pipe), viv_response. Comparisons against Xu 2023 measured
+frequencies remain PENDING until digitization completes; the multispan
+model now builds the FULL pipe: shoulder segments beyond the pinned span
+boundaries, and bed springs in the shoulder/contact zones, instead of
+ideal pins at the span ends.
 """
 
 from __future__ import annotations
@@ -13,15 +19,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "algorithm"))
 
 from score_viv.common import (
-    ensure_dir, load_config, run_metadata, seed_everything, write_csv, write_json,
-    write_markdown,
+    ensure_dir, load_config, run_metadata, seed_everything, write_csv,
+    write_json, write_markdown, merge_overrides,
 )
+from score_viv.protocol import validate_seed
 from score_viv.fem import (
     BeamFEM, BeamModel, Support,
     cantilever_frequencies, mesh_convergence, ss_beam_frequencies,
@@ -33,6 +39,10 @@ from score_viv.viv import (
 
 EXPERIMENT_ID = "E1"
 STATUS = "IMPLEMENTED"
+
+# bed/soil spring stiffness for the shoulder-contact model [N/m/m]
+# (scenario assumption; the Xu 2023 paper does not publish soil stiffness)
+SHOULDER_SPRING_PER_M = 400.0
 
 
 def load_xu2023(root: Path) -> dict:
@@ -61,11 +71,58 @@ def load_xu2023(root: Path) -> dict:
     return {"params": params, "spans": spans}
 
 
+def build_multispan_model(L_total, EI, m_s, lengths, spring_per_m):
+    """FULL-pipe multispan model.
+
+    The Xu 2023 tests use a 5.6 m pipe with a number of pinned span
+    boundaries and pipe shoulders extending beyond them into the
+    support frames. Modeling choice (explicit, honest):
+    - span boundaries: ideal pins (the test frames impose w = 0 there)
+    - shoulder segments: the remaining pipe length beyond the outermost
+      pins, carrying distributed translational springs (bed contact)
+    """
+    nodes = [0.0]
+    for ln in lengths:
+        nodes.append(nodes[-1] + ln)
+    span_end = nodes[-1]
+    supports = []
+    for x in nodes:
+        supports.append(Support(x=x, kind="pin"))
+    # shoulder: remaining pipe on each side, grounded by bed springs
+    shoulder_l = max((L_total - span_end) / 2.0, 0.0)
+    n_spring = 8
+    springs = []
+    for side in (0, 1):
+        for i in range(n_spring):
+            if side == 0:
+                x = -(i + 0.5) * shoulder_l / n_spring
+            else:
+                x = span_end + (i + 0.5) * shoulder_l / n_spring
+            k = spring_per_m * (L_total - span_end) / n_spring
+            supports.append(Support(x=x, kind="spring", stiffness=k,
+                                    label=f"bed{side}"))
+            springs.append(x)
+    # BeamFEM snaps supports to the nearest node; extend the domain by
+    # giving BeamModel the full length and offsetting span positions.
+    x0 = -shoulder_l
+    shifted = []
+    for s in supports:
+        shifted.append(Support(x=s.x - x0, kind=s.kind,
+                               stiffness=s.stiffness, label=s.label))
+    # drop springs that fall outside [0, L_total]
+    shifted = [s for s in shifted if 0.0 <= s.x <= L_total]
+    model = BeamModel(length=L_total, EI=EI, mass_per_length=m_s,
+                      supports=shifted)
+    return model
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--output-dir", default="outputs")
-    parser.add_argument("--seed", type=int, default=20261103)
+    parser.add_argument("--seed", type=int, default=111000)
+    parser.add_argument("--level", default="formal",
+                        choices=["smoke", "pilot", "formal"])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--set", nargs="*", default=[], dest="overrides",
                         help="key.sub=value config overrides")
@@ -73,9 +130,10 @@ def main() -> int:
 
     if args.dry_run:
         print(f"{EXPERIMENT_ID} DRY_RUN config={args.config} "
-              f"output={args.output_dir} seed={args.seed}")
+              f"output={args.output_dir} seed={args.seed} level={args.level}")
         return 0
 
+    validate_seed(EXPERIMENT_ID, args.seed, args.level)
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cand = Path(__file__).parent / cfg_path
@@ -83,7 +141,6 @@ def main() -> int:
             cand = ROOT / cfg_path
         cfg_path = cand
     cfg = load_config(cfg_path)
-    from score_viv.common import merge_overrides
     merge_overrides(cfg, args.overrides)
     rng = seed_everything(args.seed)
 
@@ -101,9 +158,10 @@ def main() -> int:
         "dataset/processed/xu2023/span_geometries.csv",
     ]
     meta = run_metadata(EXPERIMENT_ID, cfg, args.seed, args.output_dir,
-                         ROOT, inputs=inputs, extra={"status": STATUS})
+                         ROOT, inputs=inputs, extra={"status": STATUS,
+                                                     "level": args.level})
 
-    # ---- stage 1: beam element + static sanity -----------------------------
+    # ---- stage 1: beam element + analytic modal -----------------------------
     cantilever = BeamModel(length=L, EI=EI, mass_per_length=m_s,
                            supports=[Support(x=0.0, kind="clamp")])
     ss = BeamModel(length=L, EI=EI, mass_per_length=m_s,
@@ -129,31 +187,24 @@ def main() -> int:
                                   / f_cant_ref[j] * 100),
         })
 
-    # ---- stage 2: mesh convergence -----------------------------------------
+    # ---- stage 2: mesh convergence (>= 4 levels) ----------------------------
     conv_rows = mesh_convergence(
         lambda n: BeamFEM(ss, n), [4, 8, 16, 32, 64, 128], n_modes=2)
 
-    # ---- stage 3: multispan modal (Xu 2023 geometries) ----------------------
-    # shoulders at the outer ends: pinned at 0 and L; each internal span
-    # boundary at the cumulative length positions (pin).
+    # ---- stage 3: multispan modal — FULL pipe with shoulders ---------------
     multi_rows = []
     for case in data["spans"]:
-        lengths = case["lengths_m"]
-        nodes = [0.0]
-        for ln in lengths:
-            nodes.append(nodes[-1] + ln)
-        supports = [Support(x=nodes[0], kind="pin"),
-                    Support(x=nodes[-1], kind="pin")]
-        for xint in nodes[1:-1]:
-            supports.append(Support(x=xint, kind="pin"))
-        model = BeamModel(length=nodes[-1], EI=EI, mass_per_length=m_s,
-                          supports=supports)
-        fem = BeamFEM(model, 96)
+        model = build_multispan_model(
+            L, EI, m_s, case["lengths_m"], SHOULDER_SPRING_PER_M)
+        fem = BeamFEM(model, 128)
         freqs, _ = fem.natural_modes(3)
+        span_sum = sum(case["lengths_m"])
         multi_rows.append({
             "case_id": case["case_id"], "span_type": case["span_type"],
             "span_ratio": case["span_ratio"],
-            "total_len_m": nodes[-1],
+            "span_total_m": span_sum,
+            "shoulder_total_m": L - span_sum,
+            "total_len_m": L,
             "f1_hz": float(freqs[0]), "f2_hz": float(freqs[1]),
             "f3_hz": float(freqs[2]),
             "measured_f1_hz": None,   # digitization PENDING
@@ -162,10 +213,7 @@ def main() -> int:
         })
 
     # ---- stage 4: VIV screening response ------------------------------------
-    # first multispan mode as reference frequency
     f_ref = multi_rows[0]["f1_hz"]
-    # mass ratio CONVENTION check: Xu's 1.90 is m_s/(rho pi D^2/4) WITHOUT
-    # the +1 added-mass term; mass_ratio() includes it (DNV convention).
     m_star_calc = mass_ratio(m_s, D) - 1.0
     m_star_full = mass_ratio(m_s, D)
     cfg_screen = ScreeningConfig(
@@ -179,39 +227,36 @@ def main() -> int:
 
     # stress recovery on the dominant mode of the first case
     first = data["spans"][0]
-    nodes = [0.0]
-    for ln in first["lengths_m"]:
-        nodes.append(nodes[-1] + ln)
-    supports = [Support(x=nodes[0], kind="pin"),
-                Support(x=nodes[-1], kind="pin")]
-    fem = BeamFEM(BeamModel(length=nodes[-1], EI=EI, mass_per_length=m_s,
-                           supports=supports), 96)
+    model = build_multispan_model(L, EI, m_s, first["lengths_m"],
+                                  SHOULDER_SPRING_PER_M)
+    fem = BeamFEM(model, 128)
     freqs, shapes = fem.natural_modes(1)
-    # E is implied from EI and an assumed thin-wall section: EI = E * I.
-    # Use the published EI directly for stress via curvature * c * E with
-    # E back-calculated from a copper-alloy modulus estimate is NOT
-    # published; we therefore report curvature-based stress with E
-    # EXPLICITLY as a scenario assumption.
     E_assumed = 70.0e9  # scenario assumption [Pa] (not published)
     stress = stress_from_mode_shape(shapes[0], fem.x,
                                     amplitude=0.55 * D, D=D, E=E_assumed)
 
-    # ---- outputs --------------------------------------------------------------
     write_json(out / "metadata.json", meta)
     write_json(out / "summary.json", {
         "status": STATUS,
+        "level": args.level,
         "stages_completed": cfg.get("stages"),
         "max_f1_error_analytic_pct": max(
             (r["err_ss_pct"] for r in analytic_rows), default=0.0),
         "mesh_converged_rel_err": conv_rows[-2]["rel_err_1"],
         "multispan_cases": len(multi_rows),
         "multispan_measured_pending": True,
+        "multispan_model": "full-pipe: pins at span boundaries + "
+                          f"shoulder segments ({L} m total) with bed "
+                          f"springs ({SHOULDER_SPRING_PER_M} N/m/m "
+                          "scenario value)",
         "mass_ratio_published": m_star_pub,
         "mass_ratio_calculated": m_star_calc,
         "viv_stress_recovery": stress,
         "notes": [
             "Xu 2023 measured frequencies/responses: digitization PENDING; "
             "modal errors vs measurements are not yet computable.",
+            "shoulder soil-spring stiffness is a scenario value (the "
+            "paper does not publish it); sensitivity to it belongs to E9.",
             "E assumption for stress recovery is a scenario value, not "
             "a published parameter.",
         ],
@@ -225,7 +270,7 @@ def main() -> int:
         ("Analytic modal validation (simply supported / cantilever)",
          analytic_rows),
         ("Mesh convergence", conv_rows),
-        ("Multispan modal (Xu 2023 geometries)", multi_rows),
+        ("Multispan modal (full-pipe with shoulders)", multi_rows),
         ("VIV screening sweep (first case, mode 1)", rows_viv),
     ])
     print(f"{EXPERIMENT_ID} complete: {out}")
